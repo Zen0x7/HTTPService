@@ -101,7 +101,11 @@ jobs:
       - name: Benchmark
         run: |
           # Run each registered benchmark with a small iteration count so CI
-          # stays fast. Same setarch workaround as tests for MSAN arm64.
+          # stays fast. MSAN shadows the stack, which can overflow the default
+          # limit, so raise it for sanitizer runs.
+          if [ "${{ matrix.variant }}" = "msan" ]; then
+            ulimit -s unlimited
+          fi
           if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
             setarch $(uname -m) -R ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
           else
