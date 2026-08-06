@@ -55,14 +55,14 @@ jobs:
         id: args
         run: |
           case ${{ matrix.variant }} in
-            release) echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT" ;;
-            debug)   echo "build_type=Debug"   >> "$GITHUB_OUTPUT"; echo "static=ON"        >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT" ;;
-            static)  echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=ON"        >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT" ;;
-            shared)  echo "build_type=Debug"   >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT" ;;
-            asan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=ASAN" >> "$GITHUB_OUTPUT" ;;
-            tsan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=TSAN" >> "$GITHUB_OUTPUT" ;;
-            ubsan)   echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=UBSAN" >> "$GITHUB_OUTPUT" ;;
-            msan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=MSAN" >> "$GITHUB_OUTPUT" ;;
+            release) echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT"; echo "compiler="      >> "$GITHUB_OUTPUT" ;;
+            debug)   echo "build_type=Debug"   >> "$GITHUB_OUTPUT"; echo "static=ON"        >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT"; echo "compiler="      >> "$GITHUB_OUTPUT" ;;
+            static)  echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=ON"        >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT"; echo "compiler="      >> "$GITHUB_OUTPUT" ;;
+            shared)  echo "build_type=Debug"   >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=OFF" >> "$GITHUB_OUTPUT"; echo "compiler="      >> "$GITHUB_OUTPUT" ;;
+            asan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=ASAN" >> "$GITHUB_OUTPUT"; echo "compiler=clang" >> "$GITHUB_OUTPUT" ;;
+            tsan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=TSAN" >> "$GITHUB_OUTPUT"; echo "compiler=clang" >> "$GITHUB_OUTPUT" ;;
+            ubsan)   echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=UBSAN" >> "$GITHUB_OUTPUT"; echo "compiler=clang" >> "$GITHUB_OUTPUT" ;;
+            msan)    echo "build_type=Release" >> "$GITHUB_OUTPUT"; echo "static=OFF"       >> "$GITHUB_OUTPUT"; echo "sanitizer=MSAN" >> "$GITHUB_OUTPUT"; echo "compiler=clang" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Configure
@@ -71,9 +71,14 @@ jobs:
           if [ "${{ steps.args.outputs.sanitizer }}" != "OFF" ]; then
             SANITIZER_ARG="-DENABLE_${{ steps.args.outputs.sanitizer }}=ON"
           fi
+          COMPILER_ARGS=""
+          if [ "${{ steps.args.outputs.compiler }}" = "clang" ]; then
+            COMPILER_ARGS="-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++"
+          fi
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${{ steps.args.outputs.build_type }} \
             -DENABLE_STATIC_LINKING=${{ steps.args.outputs.static }} \
+            ${COMPILER_ARGS} \
             ${SANITIZER_ARG} \
             -DENABLE_BUILD_TESTS=ON \
             -DENABLE_BUILD_BENCHMARKS=ON
@@ -83,4 +88,8 @@ jobs:
 
       - name: Test
         run: |
-          ctest --test-dir build -j4 --output-on-failure
+          if [ "${{ matrix.variant }}" = "tsan" ]; then
+            setarch $(uname -m) -R ctest --test-dir build -j4 --output-on-failure
+          else
+            ctest --test-dir build -j4 --output-on-failure
+          fi
