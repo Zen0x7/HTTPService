@@ -97,3 +97,13 @@ jobs:
           else
             ctest --test-dir build -j4 --output-on-failure
           fi
+
+      - name: Benchmark
+        run: |
+          # Run each registered benchmark with a small iteration count so CI
+          # stays fast. Same setarch workaround as tests for MSAN arm64.
+          if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            setarch $(uname -m) -R ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
+          else
+            ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
+          fi
