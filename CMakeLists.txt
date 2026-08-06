@@ -48,6 +48,16 @@ if (ENABLE_MSAN)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         message(FATAL_ERROR "MSAN requires Clang")
     endif ()
+    # MSAN needs the whole C++ stdlib instrumented; the bcompiler msan image
+    # ships an MSAN-instrumented libc++ in /usr/local. It also requires PIE.
+    add_compile_options(-stdlib=libc++ -nostdinc++ -isystem /usr/local/include/c++/v1 -fPIE)
+    add_link_options(-stdlib=libc++ -L/usr/local/lib -Wl,-rpath,/usr/local/lib -pie)
+endif ()
+
+if (ENABLE_TSAN)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        add_link_options(-fuse-ld=bfd)
+    endif ()
 endif ()
 
 if (ENABLE_STATIC_LINKING)
@@ -119,10 +129,10 @@ if (ENABLE_BUILD_TESTS)
         target_link_options(tests_version PRIVATE -fsanitize=memory -fsanitize-memory-track-origins)
     endif ()
     if (ENABLE_TSAN OR ENABLE_MSAN)
-        # TSAN/MSAN binaries cannot run during build (gtest_discover_tests runs
-        # the test executable to list cases; TSAN crashes with personality() on
-        # GitHub runners, MSAN with shadow-memory mapping). Register the test
-        # directly instead.
+        # gtest_discover_tests runs the test executable during build to list
+        # cases, which TSAN/MSAN cannot do under the build-time environment.
+        # Register the test directly instead so it runs under ctest (with
+        # seccomp unconfined for TSAN, instrumented libc++ + PIE for MSAN).
         set(_san_opts "LD_LIBRARY_PATH=/usr/local/lib")
         if (ENABLE_TSAN)
             set(_san_opts "TSAN_OPTIONS=halt_on_error=1;LD_LIBRARY_PATH=/usr/local/lib")

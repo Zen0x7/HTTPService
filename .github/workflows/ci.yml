@@ -41,6 +41,7 @@ jobs:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container:
       image: ghcr.io/zen0x7/bcompiler:latest-${{ matrix.variant }}-${{ matrix.distro }}-${{ matrix.arch }}
+      options: --security-opt seccomp=unconfined
     steps:
       - name: Checkout
         run: |
@@ -87,14 +88,5 @@ jobs:
         run: cmake --build build -j4
 
       - name: Test
-        if: matrix.variant != 'tsan' && matrix.variant != 'msan'
         run: |
           ctest --test-dir build -j4 --output-on-failure
-
-      - name: Verify sanitizer build
-        if: matrix.variant == 'tsan' || matrix.variant == 'msan'
-        run: |
-          echo "TSAN/MSAN cannot execute on GitHub-hosted runners:"
-          echo "  - TSAN needs ASLR disabled (personality() is blocked by seccomp)"
-          echo "  - MSAN needs the entire libc/libstdc++ instrumented"
-          echo "Compilation with the sanitizer succeeded; runtime checks require a local machine."
