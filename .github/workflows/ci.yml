@@ -92,9 +92,6 @@ jobs:
           # MSAN on arm64 loads the PIE outside its shadow-memory app range
           # under high-entropy ASLR. setarch -R runs the test with ASLR
           # disabled so the binary maps at the fixed low base.
-          if [ "${{ matrix.variant }}" = "msan" ]; then
-            export MSAN_OPTIONS="suppressions=$PWD/msan.supp"
-          fi
           if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
             setarch $(uname -m) -R ctest --test-dir build -j4 --output-on-failure
           else
@@ -102,16 +99,10 @@ jobs:
           fi
 
       - name: Benchmark
+        if: matrix.variant != 'msan'
         run: |
           # Run each registered benchmark with a small iteration count so CI
-          # stays fast. MSAN shadows the stack, which can overflow the default
-          # limit, so raise it for sanitizer runs.
-          if [ "${{ matrix.variant }}" = "msan" ]; then
-            ulimit -s unlimited
-            export MSAN_OPTIONS="suppressions=$PWD/msan.supp"
-          fi
-          if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
-            setarch $(uname -m) -R ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
-          else
-            ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
-          fi
+          # stays fast. Skipped for MSAN: Google Benchmark is not MSAN-clean
+          # (false positives in its static init and stack-overflow), so the
+          # msan variant only verifies that benchmarks compile.
+          ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
