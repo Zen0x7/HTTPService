@@ -118,13 +118,17 @@ if (ENABLE_BUILD_TESTS)
         target_compile_options(tests_version PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=memory -fsanitize-memory-track-origins)
         target_link_options(tests_version PRIVATE -fsanitize=memory -fsanitize-memory-track-origins)
     endif ()
-    if (ENABLE_TSAN)
-        # TSAN binaries cannot run during build (gtest_discover_tests runs the
-        # test executable to list cases; TSAN crashes with personality() on
-        # GitHub runners). Register the test directly instead.
-        set(_tsan_opts "TSAN_OPTIONS=halt_on_error=1;LD_LIBRARY_PATH=/usr/local/lib")
+    if (ENABLE_TSAN OR ENABLE_MSAN)
+        # TSAN/MSAN binaries cannot run during build (gtest_discover_tests runs
+        # the test executable to list cases; TSAN crashes with personality() on
+        # GitHub runners, MSAN with shadow-memory mapping). Register the test
+        # directly instead.
+        set(_san_opts "LD_LIBRARY_PATH=/usr/local/lib")
+        if (ENABLE_TSAN)
+            set(_san_opts "TSAN_OPTIONS=halt_on_error=1;LD_LIBRARY_PATH=/usr/local/lib")
+        endif ()
         add_test(NAME tests_version COMMAND tests_version)
-        set_tests_properties(tests_version PROPERTIES ENVIRONMENT "${_tsan_opts}")
+        set_tests_properties(tests_version PROPERTIES ENVIRONMENT "${_san_opts}")
     else ()
         gtest_discover_tests(tests_version)
     endif ()
