@@ -92,6 +92,9 @@ jobs:
           # MSAN on arm64 loads the PIE outside its shadow-memory app range
           # under high-entropy ASLR. setarch -R runs the test with ASLR
           # disabled so the binary maps at the fixed low base.
+          if [ "${{ matrix.variant }}" = "msan" ]; then
+            export MSAN_OPTIONS="suppressions=$PWD/msan.supp"
+          fi
           if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
             setarch $(uname -m) -R ctest --test-dir build -j4 --output-on-failure
           else
@@ -105,6 +108,7 @@ jobs:
           # limit, so raise it for sanitizer runs.
           if [ "${{ matrix.variant }}" = "msan" ]; then
             ulimit -s unlimited
+            export MSAN_OPTIONS="suppressions=$PWD/msan.supp"
           fi
           if [ "${{ matrix.variant }}" = "msan" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
             setarch $(uname -m) -R ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
