@@ -106,3 +106,29 @@ jobs:
           # (false positives in its static init and stack-overflow), so the
           # msan variant only verifies that benchmarks compile.
           ./build/benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
+
+      - name: HTTP benchmark (wrk)
+        # A real network benchmark against the running server. Only on the
+        # release variant (representative and fast); wrk ships in the
+        # bcompiler images.
+        if: matrix.variant == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/httpservice > /tmp/httpservice.log 2>&1 &
+          srv=$!
+          trap 'kill -INT "$srv" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 100); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/ 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          wrk --latency -t2 -c32 -d10s http://127.0.0.1:9000/
+
+          kill -INT "$srv" 2>/dev/null || true
+          wait "$srv" 2>/dev/null || true
+          trap - EXIT
+

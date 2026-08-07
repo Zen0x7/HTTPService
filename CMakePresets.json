@@ -4,13 +4,13 @@
     {
       "name": "debug",
       "displayName": "Debug",
-      "description": "Debug build with tests",
+      "description": "Debug build with tests (benchmarks need the bcompiler image)",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_BUILD_TESTS": "ON",
-        "ENABLE_BUILD_BENCHMARKS": "ON"
+        "ENABLE_BUILD_BENCHMARKS": "OFF"
       }
     },
     {
