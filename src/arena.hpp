@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <memory>
@@ -110,24 +111,25 @@ public:
             n = 1;
         }
 
-        if (chunks_.empty())
+        if (count_ == 0)
         {
             grow(std::max(n + alignment, pool_.chunk_size()), alignment);
         }
 
-        for (auto& chunk : chunks_)
+        for (std::size_t i = 0; i < size(); ++i)
         {
-            void* base = chunk.data + chunk.offset;
-            std::size_t space = chunk.size - chunk.offset;
+            chunk& c = at(i);
+            void* base = c.data + c.offset;
+            std::size_t space = c.size - c.offset;
             if (void* p = std::align(alignment, n, base, space))
             {
-                chunk.offset = static_cast<std::byte*>(p) - chunk.data + n;
+                c.offset = static_cast<std::byte*>(p) - c.data + n;
                 return p;
             }
         }
 
         grow(n + alignment, alignment);
-        chunk& back = chunks_.back();
+        chunk& back = at(size() - 1);
         void* base = back.data + back.offset;
         std::size_t space = back.size - back.offset;
         void* p = std::align(alignment, n, base, space);
@@ -141,9 +143,9 @@ public:
     void
     reset()
     {
-        for (auto& chunk : chunks_)
+        for (std::size_t i = 0; i < size(); ++i)
         {
-            chunk.offset = 0;
+            at(i).offset = 0;
         }
     }
 
@@ -151,9 +153,9 @@ public:
     capacity() const
     {
         std::size_t total = 0;
-        for (auto const& chunk : chunks_)
+        for (std::size_t i = 0; i < size(); ++i)
         {
-            total += chunk.size;
+            total += at(i).size;
         }
         return total;
     }
@@ -165,6 +167,28 @@ private:
         std::size_t size;
         std::size_t offset;
     };
+
+    // Fixed tracking for the common case (requests span at most a handful of
+    // 1MiB chunks); a heap vector only for absurdly large requests.
+    static constexpr std::size_t fixed_chunks = 16;
+
+    std::size_t
+    size() const noexcept
+    {
+        return count_ + overflow_.size();
+    }
+
+    chunk&
+    at(std::size_t i) noexcept
+    {
+        return i < fixed_chunks ? chunks_[i] : overflow_[i - fixed_chunks];
+    }
+
+    chunk const&
+    at(std::size_t i) const noexcept
+    {
+        return i < fixed_chunks ? chunks_[i] : overflow_[i - fixed_chunks];
+    }
 
     void
     grow(std::size_t min_bytes, std::size_t alignment)
@@ -180,21 +204,31 @@ private:
         std::size_t space = size;
         p = std::align(alignment, 1, p, space);
         std::byte* data = static_cast<std::byte*>(p);
-        chunks_.push_back({data, size, 0});
+        if (count_ < fixed_chunks)
+        {
+            chunks_[count_++] = {data, size, 0};
+        }
+        else
+        {
+            overflow_.push_back({data, size, 0});
+        }
     }
 
     void
     release_all()
     {
-        for (auto& chunk : chunks_)
+        for (std::size_t i = 0; i < size(); ++i)
         {
-            pool_.release(chunk.data);
+            pool_.release(at(i).data);
         }
-        chunks_.clear();
+        count_ = 0;
+        overflow_.clear();
     }
 
     chunk_pool& pool_;
-    std::vector<chunk> chunks_;
+    std::array<chunk, fixed_chunks> chunks_{};
+    std::size_t count_ = 0;
+    std::vector<chunk> overflow_;
 };
 
 // The arena active on the current thread. Session handlers set this to the

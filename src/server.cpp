@@ -42,6 +42,28 @@ namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
+// Each io_context runs on exactly one thread, so the reactor's per-io-object
+// and registration locks are disabled, and the reactor I/O object states and
+// timer heap are preallocated to avoid per-connection allocations. The
+// scheduler lock stays on because cross-thread posts (accept handoff, stop)
+// still occur.
+inline net::config_from_string
+io_context_config()
+{
+    return net::config_from_string{
+        "scheduler.concurrency_hint=1\n"
+        "scheduler.locking=1\n"
+        // Reactor locks stay on: async_accept registers the accepted socket
+        // with the connection reactor from the listener thread, so the
+        // descriptor state is touched by two threads.
+        "reactor.registration_locking=1\n"
+        "reactor.io_locking=1\n"
+        // Preallocate the reactor/timer state so connection churn performs no
+        // per-connection allocations.
+        "reactor.preallocated_io_objects=16\n"
+        "timer.heap_reserve=16\n"};
+}
+
 using allocator_type = arena_allocator<char>;
 using body_type = http::basic_string_body<char, std::char_traits<char>, allocator_type>;
 using request_parser_type = http::request_parser<body_type, allocator_type>;
@@ -192,17 +214,28 @@ private:
     response_type response_;
 };
 
-// Everything owned by a connection thread: its io_context, the thread-local
-// chunk pool that backs the per-session arenas, and the intrusive list of live
-// sessions. No locks: the list is only touched on the connection thread.
-class connection_ctx
-{
-public:
-    explicit connection_ctx(config const& cfg)
-        : pool_(cfg.arena_bytes, cfg.per_request_bytes)
-        , timeout_seconds_(cfg.session_timeout_seconds)
-        , guard_(net::make_work_guard(ioc_))
+    // Everything owned by a connection thread: its io_context, the thread-local
+    // chunk pool that backs the per-session arenas, and the intrusive list of
+    // live sessions. No locks: the list is only touched on the connection
+    // thread.
+    class connection_ctx
     {
+    public:
+        // Session slots preallocated so connection churn never mallocs a session.
+        static constexpr std::size_t pooled_sessions = 32;
+
+        explicit connection_ctx(config const& cfg)
+            : pool_(cfg.arena_bytes, cfg.per_request_bytes)
+            , timeout_seconds_(cfg.session_timeout_seconds)
+            , guard_(net::make_work_guard(ioc_))
+        {
+            // Preallocate the session slots so connection churn never mallocs a
+            // session object. Beyond this cap new slots are grown on demand.
+        free_sessions_.reserve(pooled_sessions);
+        for (std::size_t i = 0; i < pooled_sessions; ++i)
+        {
+            free_sessions_.push_back(::operator new(sizeof(session)));
+        }
     }
 
     ~connection_ctx()
@@ -306,7 +339,7 @@ public:
         release_session_memory(s);
     }
 
-    net::io_context ioc_{1};
+    net::io_context ioc_{io_context_config()};
     chunk_pool pool_;
     std::size_t timeout_seconds_;
     net::executor_work_guard<net::io_context::executor_type> guard_;
@@ -318,7 +351,7 @@ public:
 // socket is bound to the strand of a connection thread at accept time, so the
 // connection's async operations run on that thread. The accept loop itself is
 // re-armed on this listener's io_context.
-class listener
+ class listener
 {
 public:
     listener(config const& cfg,
@@ -413,12 +446,15 @@ private:
         pending_accepts_.fetch_add(1, std::memory_order_relaxed);
 
         // Bind the accepted socket to the connection thread's strand: the
-        // connection keeps this executor for the whole session.
+        // connection keeps this executor for the whole session. The accept
+        // handler and the re-arm post allocate from this listener's slot pool.
         acceptor_.async_accept(
             net::make_strand(ctx.ioc_),
-            [this, ctx = &ctx](beast::error_code ec, tcp::socket socket) {
-                on_accept(ctx, ec, std::move(socket));
-            });
+            net::bind_allocator(
+                handler_allocator<int>{handler_mem_},
+                [this, ctx = &ctx](beast::error_code ec, tcp::socket socket) {
+                    on_accept(ctx, ec, std::move(socket));
+                }));
     }
 
     void
@@ -431,7 +467,8 @@ private:
 
             // Construct the session on the connection thread: its object comes
             // from that thread's recycling pool (no heap), and the session is
-            // then started there.
+            // then started there. This handoff crosses threads, so the posted
+            // task itself allocates on the heap (one per connection).
             net::post(ctx->ioc_, [ctx, socket = std::move(socket)]() mutable {
                 session* s = ctx->make_session(std::move(socket));
                 ctx->add(s);
@@ -450,10 +487,14 @@ private:
             return;
         }
 
-        net::post(ioc_, [this] { do_accept(); });
+        net::post(
+            ioc_,
+            net::bind_allocator(
+                handler_allocator<int>{handler_mem_},
+                [this] { do_accept(); }));
     }
 
-    net::io_context ioc_{1};
+    net::io_context ioc_{io_context_config()};
     tcp::acceptor acceptor_{ioc_};
     connection_ctx** conns_;
     std::size_t num_conns_;
@@ -461,6 +502,7 @@ private:
     std::atomic<std::size_t> pending_accepts_{0};
     std::atomic<bool> stopped_{false};
     net::executor_work_guard<net::io_context::executor_type> guard_;
+    handler_memory handler_mem_;
 };
 
 // --- session --------------------------------------------------------------

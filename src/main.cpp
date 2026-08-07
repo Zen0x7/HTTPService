@@ -32,6 +32,9 @@ main()
       .session_timeout_seconds = 30,
   };
 
+  // stop() only posts to the io_contexts; the main thread is blocked in
+  // service::run() (join) with no allocation in flight, so this is safe in
+  // practice. TSAN flags it as "signal-unsafe" but it is not a data race.
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 

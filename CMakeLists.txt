@@ -20,10 +20,15 @@ project(httpservice VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 23)
 
+# Pin the Release optimization explicitly so it cannot be degraded by a
+# CXXFLAGS/CMAKE_CXX_FLAGS set in the build environment or base image.
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+message(STATUS "CXX flags (${CMAKE_BUILD_TYPE}): ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}}")
+
 option(ENABLE_BUILD_TESTS "Build unit tests" OFF)
 option(ENABLE_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(ENABLE_STATIC_LINKING "Enable static linking" OFF)
-option(ENABLE_LTO "Enable LTO optimization (Release only)" OFF)
+option(ENABLE_LTO "Enable LTO optimization (Release only)" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
@@ -79,7 +84,10 @@ target_link_libraries(httpservice_core PUBLIC
     Threads::Threads
 )
 
-if (ENABLE_LTO)
+if (ENABLE_LTO
+    AND NOT ENABLE_ASAN AND NOT ENABLE_TSAN AND NOT ENABLE_UBSAN AND NOT ENABLE_MSAN
+    AND CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
+    # Beast/Asio are header-only, so LTO optimizes across the whole hot path.
     target_compile_options(httpservice_core PUBLIC -flto=auto)
     target_link_options(httpservice_core PUBLIC -flto=auto)
 endif ()
