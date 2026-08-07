@@ -67,15 +67,16 @@ if (ENABLE_STATIC_LINKING)
 endif ()
 
 find_package(Boost 1.92.0 REQUIRED COMPONENTS json program_options charconv)
+find_package(Threads REQUIRED)
 find_package(GTest REQUIRED)
-find_package(benchmark REQUIRED)
 
-add_library(httpservice_core STATIC src/version.cpp)
+add_library(httpservice_core STATIC src/version.cpp src/server.cpp)
 target_include_directories(httpservice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(httpservice_core PUBLIC
     Boost::json
     Boost::program_options
     Boost::charconv
+    Threads::Threads
 )
 
 if (ENABLE_LTO)
@@ -110,28 +111,43 @@ if (ENABLE_BUILD_TESTS)
     enable_testing()
     include(GoogleTest)
 
+    function(httpservice_add_sanitizers target)
+        if (ENABLE_ASAN)
+            target_compile_options(${target} PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        endif ()
+        if (ENABLE_TSAN)
+            target_compile_options(${target} PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=thread)
+            target_link_options(${target} PRIVATE -fsanitize=thread)
+        endif ()
+        if (ENABLE_UBSAN)
+            target_compile_options(${target} PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=undefined)
+            target_link_options(${target} PRIVATE -fsanitize=undefined)
+        endif ()
+        if (ENABLE_MSAN)
+            target_compile_options(${target} PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=memory -fsanitize-memory-track-origins)
+            target_link_options(${target} PRIVATE -fsanitize=memory -fsanitize-memory-track-origins)
+        endif ()
+    endfunction()
+
     add_executable(tests_version tests/tests_version.cpp)
     target_link_libraries(tests_version PRIVATE httpservice_core GTest::gtest_main)
-    if (ENABLE_ASAN)
-        target_compile_options(tests_version PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
-        target_link_options(tests_version PRIVATE -fsanitize=address,undefined)
-    endif ()
-    if (ENABLE_TSAN)
-        target_compile_options(tests_version PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=thread)
-        target_link_options(tests_version PRIVATE -fsanitize=thread)
-    endif ()
-    if (ENABLE_UBSAN)
-        target_compile_options(tests_version PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=undefined)
-        target_link_options(tests_version PRIVATE -fsanitize=undefined)
-    endif ()
+    httpservice_add_sanitizers(tests_version)
+
+    add_executable(tests_server tests/tests_server.cpp)
+    target_include_directories(tests_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(tests_server PRIVATE httpservice_core GTest::gtest_main)
+    httpservice_add_sanitizers(tests_server)
     if (ENABLE_MSAN)
-        target_compile_options(tests_version PRIVATE -O1 -g -fno-omit-frame-pointer -fsanitize=memory -fsanitize-memory-track-origins)
-        target_link_options(tests_version PRIVATE -fsanitize=memory -fsanitize-memory-track-origins)
+        # MSAN cannot trace data read from kernel sockets (it reports it as
+        # uninitialized), so the network integration test is skipped on msan.
+        target_compile_definitions(tests_server PRIVATE HTTPSERVICE_DISABLE_NETWORK_TESTS)
     endif ()
+
     if (ENABLE_TSAN OR ENABLE_MSAN)
         # gtest_discover_tests runs the test executable during build to list
         # cases, which TSAN/MSAN cannot do under the build-time environment.
-        # Register the test directly instead so it runs under ctest (with
+        # Register the tests directly instead so they run under ctest (with
         # seccomp unconfined for TSAN, instrumented libc++ + PIE for MSAN).
         set(_san_opts "LD_LIBRARY_PATH=/usr/local/lib")
         if (ENABLE_TSAN)
@@ -139,12 +155,22 @@ if (ENABLE_BUILD_TESTS)
         endif ()
         add_test(NAME tests_version COMMAND tests_version)
         set_tests_properties(tests_version PROPERTIES ENVIRONMENT "${_san_opts}")
+        add_test(NAME tests_server COMMAND tests_server)
+        set_tests_properties(tests_server PROPERTIES ENVIRONMENT "${_san_opts}")
     else ()
         gtest_discover_tests(tests_version)
+        gtest_discover_tests(tests_server)
     endif ()
 endif ()
 
 if (ENABLE_BUILD_BENCHMARKS)
+    find_package(benchmark REQUIRED)
+
     add_executable(benchmarks benchmarks/version_benchmark.cpp)
     target_link_libraries(benchmarks PRIVATE httpservice_core benchmark::benchmark benchmark::benchmark_main)
+
+    # Standalone server benchmark: starts/stops the service around the run, so
+    # it defines its own main() and must not link benchmark::benchmark_main.
+    add_executable(benchmarks_server benchmarks/server_benchmark.cpp)
+    target_link_libraries(benchmarks_server PRIVATE httpservice_core benchmark::benchmark)
 endif ()

@@ -1,13 +1,45 @@
-#include <boost/json.hpp>
+#include <httpservice/server.hpp>
 
-#include <httpservice/version.hpp>
+#include <csignal>
+#include <cstdio>
 
-#include <iostream>
+namespace
+{
+
+httpservice::service* g_service = nullptr;
+
+void
+on_signal(int)
+{
+  if (g_service != nullptr)
+  {
+    g_service->stop();
+  }
+}
+
+} // namespace
 
 int
 main()
 {
-  boost::json::value body = {{"service", "httpservice"}, {"version", httpservice::get_version()}};
-  std::cout << boost::json::serialize(body) << std::endl;
+  httpservice::config c{
+      .address = "0.0.0.0",
+      .port = 9000,
+      .listener_threads = 4,
+      .connection_threads = 8,
+      .arena_bytes = 32 * 1024 * 1024,
+      .per_request_bytes = 1024 * 1024,
+      .session_timeout_seconds = 30,
+  };
+
+  std::signal(SIGINT, on_signal);
+  std::signal(SIGTERM, on_signal);
+
+  std::printf("httpservice listening on %s:%u\n", c.address.c_str(), c.port);
+
+  httpservice::service s(c);
+  g_service = &s;
+  s.run();
+  g_service = nullptr;
   return 0;
 }
