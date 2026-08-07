@@ -70,21 +70,8 @@ find_package(Boost 1.92.0 REQUIRED COMPONENTS json program_options charconv)
 find_package(Threads REQUIRED)
 find_package(GTest REQUIRED)
 
-# Boost.Asio includes <linux/version.h> on Linux. The alpine/musl bcompiler
-# images do not ship the kernel headers, so provide a minimal stub only when
-# the real header is unavailable (never shadows the system one).
-include(CheckIncludeFile)
-check_include_file("linux/version.h" HTTPSERVICE_HAVE_LINUX_VERSION_H)
-if (NOT HTTPSERVICE_HAVE_LINUX_VERSION_H)
-    message(STATUS "linux/version.h not found; using bundled stub for Boost.Asio")
-    set(HTTPSERVICE_LINUX_STUB ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux-stub)
-endif ()
-
 add_library(httpservice_core STATIC src/version.cpp src/server.cpp)
 target_include_directories(httpservice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-if (HTTPSERVICE_LINUX_STUB)
-    target_include_directories(httpservice_core PUBLIC ${HTTPSERVICE_LINUX_STUB})
-endif ()
 target_link_libraries(httpservice_core PUBLIC
     Boost::json
     Boost::program_options
