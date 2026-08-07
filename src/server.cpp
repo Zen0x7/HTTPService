@@ -3,6 +3,7 @@
 #include "allocator.hpp"
 #include "arena.hpp"
 
+#include <boost/asio/bind_allocator.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
@@ -50,6 +51,116 @@ using arena_flat_buffer = beast::basic_flat_buffer<allocator_type>;
 class connection_ctx;
 class session;
 
+// Per-session pool of fixed slots for the async operation machinery (the write
+// composed op + the deferral post). Mirrors the canonical Asio
+// allocation/server.cpp handler_memory pattern: a slot is borrowed for the
+// duration of one operation and returned on deallocate. If a request exceeds a
+// slot size (or all slots are busy) the pool falls back to the heap.
+class handler_memory
+{
+public:
+    static constexpr std::size_t slot_count = 4;
+    static constexpr std::size_t slot_size = 1024;
+
+    handler_memory()
+    {
+        for (std::size_t i = 0; i < slot_count; ++i)
+        {
+            slots_[i].next = free_;
+            free_ = &slots_[i];
+        }
+    }
+
+    handler_memory(handler_memory const&) = delete;
+    handler_memory& operator=(handler_memory const&) = delete;
+
+    void*
+    allocate(std::size_t n)
+    {
+        if (n > slot_size || free_ == nullptr)
+        {
+            return ::operator new(n);
+        }
+        slot* s = free_;
+        free_ = s->next;
+        return &s->storage;
+    }
+
+    void
+    deallocate(void* p) noexcept
+    {
+        for (auto& s : slots_)
+        {
+            if (p == &s.storage)
+            {
+                s.next = free_;
+                free_ = &s;
+                return;
+            }
+        }
+        ::operator delete(p);
+    }
+
+private:
+    struct slot
+    {
+        alignas(std::max_align_t) std::byte storage[slot_size];
+        slot* next = nullptr;
+    };
+
+    slot slots_[slot_count];
+    slot* free_ = nullptr;
+};
+
+// C++11 minimal allocator for use with net::bind_allocator.
+template <class T>
+class handler_allocator
+{
+public:
+    using value_type = T;
+
+    explicit handler_allocator(handler_memory& mem) noexcept
+        : memory_(mem)
+    {
+    }
+
+    template <class U>
+    handler_allocator(handler_allocator<U> const& other) noexcept
+        : memory_(other.memory_)
+    {
+    }
+
+    T*
+    allocate(std::size_t n) const
+    {
+        return static_cast<T*>(memory_.allocate(sizeof(T) * n));
+    }
+
+    void
+    deallocate(T* p, std::size_t) const noexcept
+    {
+        memory_.deallocate(p);
+    }
+
+    friend bool
+    operator==(handler_allocator const& a, handler_allocator const& b) noexcept
+    {
+        return &a.memory_ == &b.memory_;
+    }
+
+    friend bool
+    operator!=(handler_allocator const& a, handler_allocator const& b) noexcept
+    {
+        return &a.memory_ != &b.memory_;
+    }
+
+private:
+    template <class>
+    friend class handler_allocator;
+
+    handler_memory& memory_;
+};
+
 // One accepted connection. Confined to a single connection thread (its socket
 // was bound to that thread's strand at accept time) and deleted (delete this)
 // when the connection closes. Each session owns its own arena so a per-request
@@ -75,6 +186,7 @@ private:
     beast::tcp_stream stream_;
     connection_ctx& ctx_;
     arena arena_;
+    handler_memory handler_mem_;
     arena_flat_buffer buffer_;
     std::optional<request_parser_type> parser_;
     response_type response_;
@@ -91,6 +203,16 @@ public:
         , timeout_seconds_(cfg.session_timeout_seconds)
         , guard_(net::make_work_guard(ioc_))
     {
+    }
+
+    ~connection_ctx()
+    {
+        // drain() runs before this (in the connection thread loop); free the
+        // recycled session slots. Live sessions are gone by then.
+        for (void* p : free_sessions_)
+        {
+            ::operator delete(p);
+        }
     }
 
     chunk_pool& pool() noexcept
@@ -144,17 +266,52 @@ public:
         for (session* s = first_; s != nullptr;)
         {
             session* next = s->next_;
-            delete s;
+            destroy_session(s);
             s = next;
         }
         first_ = nullptr;
     }
 
-    net::io_context ioc_;
+    // Session objects come from a small recycling pool so connection churn does
+    // not malloc/free a session per accept. Slots are grown on demand and
+    // returned on close; only ever touched on this connection thread.
+    void*
+    acquire_session_memory()
+    {
+        if (free_sessions_.empty())
+        {
+            return ::operator new(sizeof(session));
+        }
+        void* p = free_sessions_.back();
+        free_sessions_.pop_back();
+        return p;
+    }
+
+    void
+    release_session_memory(void* p)
+    {
+        free_sessions_.push_back(p);
+    }
+
+    session*
+    make_session(tcp::socket&& socket)
+    {
+        return new (acquire_session_memory()) session(std::move(socket), *this);
+    }
+
+    void
+    destroy_session(session* s)
+    {
+        s->~session();
+        release_session_memory(s);
+    }
+
+    net::io_context ioc_{1};
     chunk_pool pool_;
     std::size_t timeout_seconds_;
     net::executor_work_guard<net::io_context::executor_type> guard_;
     session* first_ = nullptr;
+    std::vector<void*> free_sessions_;
 };
 
 // Accepts connections on one io_context with SO_REUSEPORT. Each accepted
@@ -272,9 +429,14 @@ private:
             beast::error_code noec;
             socket.set_option(tcp::no_delay(true), noec);
 
-            session* s = new session(std::move(socket), *ctx);
-            ctx->add(s);
-            s->run();
+            // Construct the session on the connection thread: its object comes
+            // from that thread's recycling pool (no heap), and the session is
+            // then started there.
+            net::post(ctx->ioc_, [ctx, socket = std::move(socket)]() mutable {
+                session* s = ctx->make_session(std::move(socket));
+                ctx->add(s);
+                s->run();
+            });
         }
         else if (ec != net::error::operation_aborted)
         {
@@ -291,7 +453,7 @@ private:
         net::post(ioc_, [this] { do_accept(); });
     }
 
-    net::io_context ioc_;
+    net::io_context ioc_{1};
     tcp::acceptor acceptor_{ioc_};
     connection_ctx** conns_;
     std::size_t num_conns_;
@@ -318,7 +480,9 @@ session::run()
     // thread's io_context so do_read runs where the session arena is active.
     net::post(
         ctx_.ioc_,
-        beast::bind_front_handler(&session::do_read, this));
+        net::bind_allocator(
+            handler_allocator<int>{handler_mem_},
+            beast::bind_front_handler(&session::do_read, this)));
 }
 
 void
@@ -341,7 +505,9 @@ session::do_read()
         stream_,
         buffer_,
         *parser_,
-        beast::bind_front_handler(&session::on_read, this));
+        net::bind_allocator(
+            handler_allocator<int>{handler_mem_},
+            beast::bind_front_handler(&session::on_read, this)));
 }
 
 void
@@ -378,7 +544,9 @@ session::send_response()
     http::async_write(
         stream_,
         std::move(response_),
-        beast::bind_front_handler(&session::on_write, this, keep_alive));
+        net::bind_allocator(
+            handler_allocator<int>{handler_mem_},
+            beast::bind_front_handler(&session::on_write, this, keep_alive)));
 }
 
 void
@@ -399,7 +567,9 @@ session::on_write(bool keep_alive, beast::error_code ec, std::size_t bytes_trans
     // arena reset from clobbering live objects.
     net::post(
         ctx_.ioc_,
-        beast::bind_front_handler(&session::do_read, this));
+        net::bind_allocator(
+            handler_allocator<int>{handler_mem_},
+            beast::bind_front_handler(&session::do_read, this)));
 }
 
 void
@@ -418,7 +588,7 @@ session::do_close()
     stream_.socket().shutdown(tcp::socket::shutdown_send, ec);
     stream_.socket().close(ec);
     ctx_.remove(this);
-    delete this;
+    ctx_.destroy_session(this);
 }
 
 } // namespace detail
