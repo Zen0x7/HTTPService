@@ -174,3 +174,4 @@ if (ENABLE_BUILD_BENCHMARKS)
     add_executable(benchmarks_server benchmarks/server_benchmark.cpp)
     target_link_libraries(benchmarks_server PRIVATE httpservice_core benchmark::benchmark)
 endif ()
+
